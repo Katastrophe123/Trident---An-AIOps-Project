@@ -1,0 +1,41 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Chaos overrides written at runtime (may contain a deliberately wrong password)
+.chaos/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local artifacts
+*.sqlite3
+*.db
+logs/
+reports/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,173 @@
+name: aiops-incident-agent
+
+# Shared by all four app containers. The anchor keeps the three services
+# genuinely identical in configuration, which is what makes "one of them has a
+# wrong password" a meaningful scenario.
+x-app-env: &app-env
+  ENVIRONMENT: local
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://aiops_app:aiops@db:5432/aiops
+  ORDERS_URL: http://orders:8000
+  PAYMENTS_URL: http://payments:8000
+  INVENTORY_URL: http://inventory:8000
+  CHAOS_ENABLED: ${CHAOS_ENABLED:-true}
+  RUN_MIGRATIONS: "false"
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+# How `chaos.py bad-config` breaks exactly one service:
+#
+#   DATABASE_URL: ${PAYMENTS_DATABASE_URL:-<good default>}
+#
+# chaos.py writes PAYMENTS_DATABASE_URL into .chaos/overrides.env and passes it
+# as `docker compose --env-file .chaos/overrides.env`, which is the only thing
+# compose consults when interpolating `${...}`. Listing that file under a
+# service's `env_file:` does NOT work - that injects the variable into the
+# container, where nothing reads it, and loses to `environment:` regardless.
+#
+# Consequence worth knowing: a plain `docker compose up` always gets the good
+# defaults. Only tools/chaos.py can inject this fault.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aiops
+      POSTGRES_PASSWORD: aiops
+      POSTGRES_DB: aiops
+    # max_connections is deliberately low so the "database exhaustion" scenario
+    # is reachable by holding ~20 connections instead of hundreds. The services
+    # connect as the NOSUPERUSER role created by docker/initdb, because
+    # PostgreSQL does not enforce this limit against superusers - see that file.
+    command: ["postgres", "-c", "max_connections=25"]
+    ports:
+      - "5436:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first initialisation of an empty data directory.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiops -d aiops"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  orders:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: orders-service
+      # Exactly one service owns the migration, so the three do not race.
+      RUN_MIGRATIONS: "true"
+      # Per-service override hook for the bad-config scenario.
+      DATABASE_URL: ${ORDERS_DATABASE_URL:-postgresql+asyncpg://aiops_app:aiops@db:5432/aiops}
+    command:
+      ["uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  payments:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: payments-service
+      DATABASE_URL: ${PAYMENTS_DATABASE_URL:-postgresql+asyncpg://aiops_app:aiops@db:5432/aiops}
+    command:
+      ["uvicorn", "services.payments.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      orders:
+        condition: service_started
+      db:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  inventory:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: inventory-service
+      DATABASE_URL: ${INVENTORY_DATABASE_URL:-postgresql+asyncpg://aiops_app:aiops@db:5432/aiops}
+    command:
+      ["uvicorn", "services.inventory.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      orders:
+        condition: service_started
+      db:
+        condition: service_healthy
+    ports:
+      - "8003:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  console:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: console
+    command:
+      ["uvicorn", "services.console.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      orders:
+        condition: service_started
+      payments:
+        condition: service_started
+      inventory:
+        condition: service_started
+    ports:
+      - "8080:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  # Steady fake orders, so a broken service always produces visible symptoms.
+  # Stop it with `docker compose stop traffic` for a quiet system.
+  traffic:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: traffic-generator
+    command:
+      ["python", "-m", "tools.traffic", "--url", "http://orders:8000",
+       "--rate", "${TRAFFIC_RATE:-2}"]
+    depends_on:
+      orders:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

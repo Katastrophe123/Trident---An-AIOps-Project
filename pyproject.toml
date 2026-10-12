@@ -1,0 +1,96 @@
+[project]
+name = "aiops-incident-agent"
+version = "0.1.0"
+description = "A demo system that breaks on purpose, and (from Phase 2) an AI agent that investigates and fixes it"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "KanishK" }]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "greenlet>=3.1",
+    # Resident-set-size for the /metrics memory reading.
+    "psutil>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "aiosqlite>=0.20",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    # Phase 2 will use this for the agent's container tools; installed now so
+    # tools/docker_client.py can be developed and tested against it.
+    "docker>=7.1",
+    "types-psutil>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["services", "tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "T20", "SIM", "RET", "C4"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["services", "tools", "tests"]
+# There is an `alembic/` directory in the repo root, so isort would otherwise
+# classify the installed `alembic` package as first-party and demand a wrong
+# import order.
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI tools print to stdout on purpose.
+"tools/*" = ["T20"]
+"alembic/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+strict_equality = true
+exclude = ["alembic/versions/", "^build/"]
+
+# asyncpg ships no py.typed marker. It is used in exactly one place
+# (chaos.exhaust_connections), which is annotated by hand.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs the docker compose stack running (deselect with -m 'not integration')",
+]
+
+[tool.coverage.run]
+source = ["services", "tools"]
+# SQLAlchemy's asyncio layer runs the ORM inside greenlets. Without this,
+# coverage loses its trace function across the greenlet switch and reports
+# every line after the first `await session.get(...)` as unexecuted - which
+# understated the real figure by roughly ten points.
+concurrency = ["greenlet", "thread"]

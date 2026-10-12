@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<!--
+  The whole dashboard is three files with no build step:
+    index.html  - the structure (this file)
+    styles.css  - all the styling
+    app.js      - fetches data every 2s and fills in the structure
+
+  Read it top to bottom; there is no framework and nothing is generated.
+  Elements that JavaScript fills in are marked with a data-bind attribute.
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIOps Console — demo system</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+  <!-- ===================== header ===================== -->
+  <header class="topbar">
+    <div class="topbar__title">
+      <h1>AIOps Console</h1>
+      <p class="subtitle">Live view of the demo system the agent will investigate</p>
+    </div>
+
+    <div class="topbar__right">
+      <!-- Overall state: icon + text, never colour on its own. -->
+      <span class="pill" data-bind="overall-pill">
+        <span class="pill__icon" data-bind="overall-icon" aria-hidden="true">•</span>
+        <span data-bind="overall-text">connecting…</span>
+      </span>
+      <span class="muted small" data-bind="last-updated">—</span>
+      <button class="btn btn--ghost" id="theme-toggle" type="button" aria-label="Switch between dark and light">
+        <span data-bind="theme-label">Light</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ===================== services ===================== -->
+    <section aria-labelledby="services-heading">
+      <div class="section-head">
+        <h2 id="services-heading">Services</h2>
+        <p class="muted small">Polled every 2 seconds from <code>GET /api/overview</code></p>
+      </div>
+      <!-- One card per service, created by app.js -->
+      <div class="grid grid--services" data-bind="services"></div>
+    </section>
+
+    <!-- ===================== orders ===================== -->
+    <section aria-labelledby="orders-heading">
+      <div class="section-head">
+        <h2 id="orders-heading">Orders by outcome</h2>
+        <p class="muted small">
+          <strong>confirmed</strong> is healthy · <strong>rejected</strong> is a business
+          outcome (declined payment, no stock) · <strong>failed</strong> means a dependency
+          was unreachable
+        </p>
+      </div>
+      <div class="panel">
+        <div class="bars" data-bind="orders-bars"></div>
+        <p class="muted small" data-bind="orders-empty">Waiting for traffic…</p>
+      </div>
+    </section>
+
+    <!-- ===================== chaos ===================== -->
+    <section aria-labelledby="chaos-heading">
+      <div class="section-head">
+        <h2 id="chaos-heading">Break it on purpose</h2>
+        <p class="muted small">
+          Three scenarios run from here. Two need the Docker socket, so the command
+          is shown instead — the socket is reserved for the agent service.
+        </p>
+      </div>
+
+      <div class="grid grid--chaos">
+        <!-- 1. slow dependency -->
+        <article class="panel chaos-card">
+          <h3>Slow dependency</h3>
+          <p class="muted small">
+            Adds a delay to every <code>inventory</code> request. Watch orders'
+            latency climb and <code>inventory</code> go degraded.
+          </p>
+          <div class="chaos-card__actions">
+            <button class="btn btn--danger" data-chaos="latency-on" type="button">Inject 3s delay</button>
+            <button class="btn" data-chaos="latency-off" type="button">Clear</button>
+          </div>
+        </article>
+
+        <!-- 2. memory leak -->
+        <article class="panel chaos-card">
+          <h3>Memory leak</h3>
+          <p class="muted small">
+            A background task appends 4&nbsp;MiB to a list twice a second in
+            <code>orders</code>. Watch the memory tile climb.
+          </p>
+          <div class="chaos-card__actions">
+            <button class="btn btn--danger" data-chaos="leak-on" type="button">Start leak</button>
+            <button class="btn" data-chaos="leak-off" type="button">Stop &amp; free</button>
+          </div>
+        </article>
+
+        <!-- 3. database exhaustion -->
+        <article class="panel chaos-card">
+          <h3>Database exhaustion</h3>
+          <p class="muted small">
+            <code>payments</code> opens and holds 20 raw connections. Postgres runs
+            with <code>max_connections=25</code>, so the others start failing.
+          </p>
+          <div class="chaos-card__actions">
+            <button class="btn btn--danger" data-chaos="db-on" type="button">Hold 20 connections</button>
+            <button class="btn" data-chaos="db-off" type="button">Release</button>
+          </div>
+        </article>
+
+        <!-- 4 & 5. container-level, shown as commands -->
+        <article class="panel chaos-card" data-bind="manual-card">
+          <h3>Container-level scenarios</h3>
+          <p class="muted small">Run these in a terminal from the repo root.</p>
+          <div data-bind="manual-list"></div>
+        </article>
+      </div>
+
+      <div class="reset-row">
+        <button class="btn btn--primary" data-chaos="reset" type="button">Reset everything to healthy</button>
+        <span class="muted small" data-bind="chaos-feedback"></span>
+      </div>
+    </section>
+
+    <!-- ===================== logs ===================== -->
+    <section aria-labelledby="logs-heading">
+      <div class="section-head">
+        <h2 id="logs-heading">Recent logs</h2>
+        <div class="log-controls">
+          <label class="field">
+            <span class="muted small">Service</span>
+            <select data-bind="log-service">
+              <option value="">all</option>
+              <option value="orders">orders</option>
+              <option value="payments">payments</option>
+              <option value="inventory">inventory</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="muted small">Minimum level</span>
+            <select data-bind="log-level">
+              <option value="">all</option>
+              <option value="INFO">INFO</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR" selected>ERROR</option>
+            </select>
+          </label>
+          <label class="field field--inline">
+            <input type="checkbox" data-bind="log-autorefresh" checked />
+            <span class="muted small">Auto-refresh</span>
+          </label>
+        </div>
+      </div>
+      <div class="panel panel--logs">
+        <table class="logs">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Level</th>
+              <th scope="col">Service</th>
+              <th scope="col">Event</th>
+              <th scope="col">Detail</th>
+            </tr>
+          </thead>
+          <tbody data-bind="logs"></tbody>
+        </table>
+        <p class="muted small" data-bind="logs-empty">No matching log records.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer muted small">
+    Phase 1 — the demo system. The LangGraph agent arrives in Phase 2 and will read
+    the same <code>/health</code>, <code>/metrics</code> and <code>/_logs</code>
+    endpoints this page does.
+  </footer>
+
+  <!--
+    One <template> per repeated thing. app.js clones these instead of building
+    HTML from strings, which keeps the markup here where you can read it.
+  -->
+  <template id="tpl-service">
+    <article class="panel service">
+      <header class="service__head">
+        <div>
+          <h3 data-bind="name"></h3>
+          <p class="muted small" data-bind="url"></p>
+        </div>
+        <span class="pill" data-bind="status-pill">
+          <span class="pill__icon" data-bind="status-icon" aria-hidden="true"></span>
+          <span data-bind="status-text"></span>
+        </span>
+      </header>
+
+      <p class="service__detail small" data-bind="detail"></p>
+
+      <!-- Four stat tiles: label, value, and (for latency) a sparkline. -->
+      <div class="stats">
+        <div class="stat">
+          <span class="stat__label">Requests</span>
+          <span class="stat__value" data-bind="requests">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">Errors</span>
+          <span class="stat__value" data-bind="errors">—</span>
+          <span class="stat__sub muted" data-bind="error-rate"></span>
+        </div>
+        <div class="stat">
+          <span class="stat__label">Latency, recent avg</span>
+          <span class="stat__value" data-bind="latency">—</span>
+          <span class="stat__sub muted" data-bind="latency-p95"></span>
+          <!-- 2px line, 10% area wash, end dot with a surface ring. -->
+          <svg class="spark" data-bind="spark-latency" viewBox="0 0 160 36"
+               preserveAspectRatio="none" role="img" aria-label="Recent latency trend"></svg>
+        </div>
+        <div class="stat">
+          <span class="stat__label">Memory</span>
+          <span class="stat__value" data-bind="memory">—</span>
+          <svg class="spark" data-bind="spark-memory" viewBox="0 0 160 36"
+               preserveAspectRatio="none" role="img" aria-label="Recent memory trend"></svg>
+        </div>
+      </div>
+
+      <ul class="deps" data-bind="deps"></ul>
+      <p class="fault small" data-bind="fault"></p>
+    </article>
+  </template>
+
+  <template id="tpl-manual">
+    <div class="manual">
+      <p class="manual__title" data-bind="title"></p>
+      <div class="manual__row">
+        <code data-bind="inject"></code>
+        <button class="btn btn--tiny" data-copy type="button">Copy</button>
+      </div>
+      <div class="manual__row">
+        <code data-bind="fix"></code>
+        <button class="btn btn--tiny" data-copy type="button">Copy</button>
+      </div>
+      <p class="muted small" data-bind="why"></p>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
