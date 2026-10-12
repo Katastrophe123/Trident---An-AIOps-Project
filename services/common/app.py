@@ -237,6 +237,15 @@ def build_operational_router(context: ServiceContext) -> APIRouter:
         elif any(item["status"] == "unhealthy" for item in dependencies):
             overall = "degraded"
             detail = "a dependency is unavailable"
+        elif degraded_dependencies := [
+            str(item["name"]) for item in dependencies if item["status"] == "degraded"
+        ]:
+            # A dependency running with reduced capability has to surface in the
+            # overall status, or it is invisible to anything that reads only
+            # that field. The agent uses this to report that it is running on
+            # the rule-based stub rather than a real model.
+            overall = "degraded"
+            detail = f"reduced capability: {', '.join(degraded_dependencies)}"
         elif chaos["latency_ms"] > 0 or chaos["memory_leak_active"]:
             overall = "degraded"
             detail = "fault injection is active in this process"

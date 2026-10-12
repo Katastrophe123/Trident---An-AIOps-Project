@@ -1,4 +1,6 @@
-# Decisions and trade-offs — Phase 1
+# Decisions and trade-offs
+
+Phase 1 is §1–22; Phase 2 is §23–33.
 
 Every entry is a point where the plan was ambiguous, where it conflicted with
 another instruction, or where the obvious implementation would have produced a
@@ -221,7 +223,7 @@ symptom (`/health` reporting an authentication error while the container is up)
 is precisely what distinguishes it from the crashed-service scenario. A container
 restarting forever is a *different* incident with a different fix.
 
-Refined once the scenario was actually run — see §19: it does not exit, but it no
+Refined once the scenario was actually run — see §18: it does not exit, but it no
 longer *waits* either when the error is a credentials problem.
 
 ---
@@ -250,7 +252,7 @@ and a word.
 
 ---
 
-## 17. The services connect as a non-superuser role
+## 16. The services connect as a non-superuser role
 
 **Decision.** `docker/initdb/01-app-role.sql` creates `aiops_app`
 (`NOSUPERUSER`) and the three services connect as that, not as the
@@ -269,7 +271,7 @@ what the reserved slots are for.
 
 ---
 
-## 18. Config overrides go through `docker compose --env-file`
+## 17. Config overrides go through `docker compose --env-file`
 
 **Decision.** `tools/compose.py` passes `--env-file .chaos/overrides.env` on
 every compose invocation.
@@ -289,7 +291,7 @@ this fault. That is the behaviour worth having.
 
 ---
 
-## 19. The entrypoint fails fast on credentials, slowly on cold starts
+## 18. The entrypoint fails fast on credentials, slowly on cold starts
 
 **Decision.** The DB wait loop retries a connection refusal up to 40 times, but
 treats `password authentication failed` (and `role "..."`, `database "..."`,
@@ -303,7 +305,7 @@ patience; a typo in a password never resolves itself.
 
 ---
 
-## 20. Database exhaustion needs eviction, and a second acquisition pass
+## 19. Database exhaustion needs eviction, and a second acquisition pass
 
 **Decision.** `exhaust_connections` takes every free slot, terminates the other
 backends belonging to the same role, then **takes the slots that eviction just
@@ -327,7 +329,7 @@ Full sequence of four failed attempts is in `RUNBOOK.md`, scenario 5.
 
 ---
 
-## 21. Inventory replenishes depleted stock
+## 20. Inventory replenishes depleted stock
 
 **Decision.** A background task tops any SKU below 20% of its seeded level back
 up every 20 seconds, clearing that SKU's reservations as shipped.
@@ -350,7 +352,7 @@ unservable orders are an unknown SKU (404) and an over-limit quantity (payment
 
 ---
 
-## 22. `uvicorn.access` is suppressed
+## 21. `uvicorn.access` is suppressed
 
 **Decision.** `uvicorn.access` is pinned to `WARNING`, alongside `httpx`,
 `httpcore` and `aiosqlite`.
@@ -379,7 +381,7 @@ all four sharing one `request_id`.
 
 ---
 
-## 23. Coverage needs `concurrency = ["greenlet", "thread"]`
+## 22. Coverage needs `concurrency = ["greenlet", "thread"]`
 
 A measurement bug, not a design decision, but worth recording. SQLAlchemy's
 asyncio layer runs the ORM inside greenlets, and coverage.py loses its trace
@@ -390,9 +392,199 @@ the project total understated by about ten points.
 
 ---
 
-## 24. Known limitations of Phase 1
+---
 
-Stated rather than hidden:
+# Phase 2 — the agent
+
+## 23. Phase 2 stops at diagnosis
+
+**Decision.** The graph is linear — `gather_evidence → diagnose → postmortem` —
+and no remediation tool is reachable from any node.
+
+**Why.** The plan's build order says so explicitly: "Build the tools, then a
+linear graph (gather → diagnose → postmortem) with no fixing yet. Get the
+diagnosis right before the agent is allowed to act." Deferred to Phase 3:
+evidence gathering as three parallel nodes, the approval interrupt,
+apply-fix/verify, the retry cap, escalation and checkpointing.
+
+Two pieces of Phase 3 are *measured* already so the branch can be validated
+before it exists: `needs_more_evidence` (the low-confidence condition) is
+computed and recorded on every diagnosis, and `AgentState` declares
+`approval_status`, `attempts` and `verification`. Adding a field to a state
+object that is already being checkpointed is more disruptive than leaving room.
+
+---
+
+## 24. Tools are an allowlist, and the risky ones are on a different class
+
+**Decision.** Five named tools in a registry, each with a `risk` level. The
+three read tools are reachable from the graph; `restart_container` and
+`rollback_config` live on a separate `RemediationTools` class that no node
+imports.
+
+**Why.** "The LLM never runs arbitrary shell commands" has to be a property of
+the code, not a line in a prompt. The model's output is *data*, validated
+against a Pydantic schema; a `proposed_action` naming anything outside the
+registry is dropped with a warning at the diagnose node. An unknown tool name
+is treated as **risky**, not safe — fail closed.
+
+The alternative, a shell plus an instruction to be careful, fails the first time
+a log line reads like an instruction. An allowlist cannot be argued out of its
+own contents. `GET /tools` publishes the list so the restriction is inspectable.
+
+---
+
+## 25. The stub provider is a baseline, not a mock
+
+**Decision.** With no `LLM_API_KEY` the agent runs a deterministic, rule-based
+diagnoser and labels everything `source: "stub"` — in the API, the stored
+incident, the postmortem body, and on `/health` as a `degraded` dependency.
+
+**Why three things at once.** It keeps the test suite offline (a suite that
+needs an API key does not run in CI); it lets the graph be demonstrated with no
+account anywhere; and it is the **baseline** the Phase 4 evaluation needs.
+"The agent diagnosed 5/5" is close to meaningless next to "a page of
+if-statements also diagnosed 5/5". If a real model cannot beat it, that is the
+finding.
+
+**The risk, and the mitigation.** A good stub could be mistaken for a working
+model. Hence the labelling in four places, and a test asserting the postmortem
+says so.
+
+---
+
+## 26. The five scenarios are described in the prompt
+
+**Decision.** `DIAGNOSE_SYSTEM` names and characterises all five failure modes.
+
+**Why.** This is a closed-world diagnosis task with five known root causes.
+Withholding them to see whether a model can infer the taxonomy from first
+principles is a different and harder experiment, and it would measure the wrong
+thing — a real on-call engineer has a runbook. Phase 4 scores whether the agent
+picks the *right* scenario, not whether it can invent the list.
+
+The prompt also states the two mistakes that make a diagnosis useless: the
+service reporting errors is not always the service at fault, and a 4xx refusal
+is not an outage.
+
+---
+
+## 27. A transitional container is not a crashed one
+
+**Found by running it.** Injecting bad-config recreates the container, so the
+monitor fired while it was mid-recreate and the agent diagnosed
+`crashed_service` at **0.95 confidence** — correct for that instant, and
+completely wrong about the fault underneath.
+
+**Decision.** `exited`/`dead` are a crash (`not_running`); `created`,
+`restarting`, `paused`, `removing` are a transition (`transitioning`), reported
+separately. A transitional container alone yields confidence 0.3 and "the system
+is still settling", with no proposed action. An unrecognised state is treated as
+stopped, so nothing disappears from the evidence.
+
+Both the prompt and the stub enforce it. After the fix the same injection
+diagnoses `bad_config` at 0.90.
+
+---
+
+## 28. Recovery resolves an incident
+
+**Found by running it.** The monitor skips a service that already has a live
+incident, so one outage produces one investigation. But Phase 2 applies no fix
+and therefore never resolved anything — so the *first* incident for a service
+silenced the monitor for that service permanently. The second scenario run
+produced no new incident at all.
+
+**Decision.** When a service's health returns, any live incident for it is
+marked `resolved` with a `resolved_at`. Recovery is the only resolution signal
+an agent that cannot act actually has: "the symptom stopped" is all it can
+observe. The diagnosis and postmortem are kept.
+
+---
+
+## 29. The agent connects as the superuser
+
+**Found by running it, and the most interesting failure of the phase.** During
+database exhaustion the agent is *also a victim*: it shares one PostgreSQL with
+the services it watches, so it was refused connections too. Its `/health`
+returned 503, `GET /incidents` returned 500, and it could not open an incident
+for the one fault it most needed to diagnose.
+
+**Decision, two parts.**
+
+1. The agent connects as `aiops` (superuser), not `aiops_app` like every other
+   service. PostgreSQL holds `superuser_reserved_connections` back for exactly
+   this situation — so an operator can get in when the application has taken
+   everything. The agent *is* the operator, so it reaches for those slots the
+   same way a human reaches for psql.
+2. Persistence is best-effort at both ends. If the incident cannot be opened or
+   saved, the investigation still runs and the conclusion is logged, so a
+   diagnosis reached while storage was down is recoverable.
+
+**The trade-off, stated.** More database privilege than the agent needs, in
+exchange for working during the scenario where it is also a victim. A production
+design would give the agent its own database rather than a bigger grant. The
+general lesson is the one worth keeping: **observability tooling must not share
+a failure domain with the thing it observes.**
+
+---
+
+## 30. `degraded` does not raise an alert
+
+**Decision.** The monitor alerts on `unhealthy` and `unreachable` only.
+
+**Why.** Slow dependency and memory leak both report `degraded` while still
+serving correctly. Alerting on degraded would open an incident the instant a
+fault is injected — before there is any symptom to diagnose, since the chaos
+endpoints set the flag immediately but latency and memory take tens of seconds
+to move. Those two scenarios are therefore triggered manually, which is
+documented rather than hidden.
+
+---
+
+## 31. Persistence happens after the graph, not inside the nodes
+
+**Decision.** Nodes take state and return state; nothing in them knows about a
+database session. `IncidentRepository` writes once, after the graph finishes.
+
+**Why.** It is what makes the nodes testable without a database, and it keeps
+the graph pure. **The trade-off is explicit:** if the process dies
+mid-investigation, that investigation leaves no trace. Phase 3's checkpointer
+fixes that, and until the graph can be interrupted there is nothing to resume
+anyway — which is also why Phase 2 compiles the graph with no checkpointer at
+all rather than adding a PostgreSQL dependency for no benefit.
+
+---
+
+## 32. Smaller things found while building Phase 2
+
+* **A degraded dependency now degrades the service.** `/health` only looked for
+  `unhealthy` dependencies, so the agent reported `healthy` while its own `llm`
+  dependency said `degraded`. Anything a dependency reports has to be reachable
+  from the status field the monitor reads.
+* **The CI workflow was invalid YAML and had never been parsed.**
+  `DATABASE_URL: sqlite+aiosqlite:///:memory:` — a plain scalar ending in `:` is
+  read as a mapping key. It would simply have failed on GitHub. There is now a
+  test that parses both the workflow and the compose file.
+* **`import docker` resolves to this repository's own `docker/` directory**
+  under mypy, because it is a namespace package with no Python in it. Isolated
+  to one helper with one suppression rather than fought with config; disabling
+  namespace packages globally breaks langgraph, which legitimately is one.
+* **The monitor tests raced the wall clock** and failed under coverage. Fixed by
+  extracting `monitor_once`, so a polling pass is tested by calling it rather
+  than by starting a task and sleeping long enough to hope.
+* **The stub's latency rule was wrong on realistic data.** Comparing the slowest
+  service against the median of the others cancels out in exactly the case that
+  matters: in a real slow-dependency incident *two* services are slow — the slow
+  one and the caller waiting on it. Replaced with an absolute floor plus a
+  spread check, preferring a callee over the caller.
+
+---
+
+## 33. Known limitations
+
+Phase 1 limitations, stated rather than hidden (Phase 2's are in §23–32 and in
+the README):
 
 * **The memory leak is reclaimed on `reset`.** A real leak is not. `reset` frees
   the leaked chunks so a demo can be re-run without a restart; the *honest* fix,

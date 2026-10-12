@@ -19,6 +19,13 @@ dependencies = [
     "greenlet>=3.1",
     # Resident-set-size for the /metrics memory reading.
     "psutil>=6.0",
+    # --- Phase 2: the agent ------------------------------------------------
+    "langgraph>=0.2.45",
+    # The LLM client speaks the OpenAI wire format, which is what Groq,
+    # Together, vLLM, Ollama and OpenAI itself all expose.
+    "openai>=1.54",
+    # The agent reads container state and (from Phase 3) restarts containers.
+    "docker>=7.1",
 ]
 
 [project.optional-dependencies]
@@ -29,10 +36,12 @@ dev = [
     "aiosqlite>=0.20",
     "ruff>=0.8",
     "mypy>=1.13",
-    # Phase 2 will use this for the agent's container tools; installed now so
-    # tools/docker_client.py can be developed and tested against it.
-    "docker>=7.1",
     "types-psutil>=6.0",
+    # Used only to assert the CI workflow and compose file are valid YAML.
+    # Worth a dev dependency: the workflow shipped unparseable once, because
+    # a plain scalar ending in ":" is read as a mapping key.
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]
@@ -61,6 +70,9 @@ known-third-party = ["alembic"]
 # CLI tools print to stdout on purpose.
 "tools/*" = ["T20"]
 "alembic/*" = ["E501"]
+# Prompts are text, not code: wrapping a line inside the prompt literal would
+# change what the model receives, and `# noqa` does not work inside a string.
+"services/agent/prompts.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -72,10 +84,10 @@ warn_redundant_casts = true
 strict_equality = true
 exclude = ["alembic/versions/", "^build/"]
 
-# asyncpg ships no py.typed marker. It is used in exactly one place
-# (chaos.exhaust_connections), which is annotated by hand.
+# Neither asyncpg nor docker ships a py.typed marker, so mypy cannot see into
+# them. Both are used in a handful of places, all annotated by hand.
 [[tool.mypy.overrides]]
-module = ["asyncpg.*"]
+module = ["asyncpg.*", "docker.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

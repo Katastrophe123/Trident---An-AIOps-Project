@@ -150,6 +150,78 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Phase 2: the incident-response agent. Diagnosis only - no remediation tool
+  # is reachable from its graph yet.
+  agent:
+    <<: *app-build
+    environment:
+      <<: *app-env
+      SERVICE_NAME: agent-service
+      # NOTE the role: `aiops` (superuser), not `aiops_app` like every other
+      # service. This is deliberate and it is the fix for a real failure found
+      # while running scenario 5. The agent shares one PostgreSQL with the
+      # services it watches, so when a service exhausts the connection pool the
+      # agent was refused too: its /health went 503, GET /incidents returned
+      # 500, and it could not even open an incident for the fault it was
+      # supposed to diagnose.
+      #
+      # PostgreSQL holds `superuser_reserved_connections` slots back for
+      # exactly this situation - so an operator can still get in when the
+      # application has taken everything. The agent *is* the operator, so it
+      # connects with those privileges, the same way a human would reach for
+      # psql. The trade-off is explicit: more database privilege than the agent
+      # needs, in exchange for being able to work during the one scenario where
+      # it is also a victim. A production design would give it a dedicated
+      # database instead.
+      DATABASE_URL: ${AGENT_DATABASE_URL:-postgresql+asyncpg://aiops:aiops@db:5432/aiops}
+      # With no LLM_API_KEY the agent runs its rule-based stub provider and
+      # labels every diagnosis `source: stub`, so an offline run is never
+      # mistaken for a model's work. Set LLM_PROVIDER=openai and LLM_API_KEY
+      # to use a real model (Groq's free tier is the cheapest option).
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
+      MONITOR_ENABLED: ${MONITOR_ENABLED:-true}
+      MONITOR_INTERVAL_SECONDS: ${MONITOR_INTERVAL_SECONDS:-5}
+      COMPOSE_PROJECT: aiops-incident-agent
+    command:
+      ["uvicorn", "services.agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      # `get_container_status` needs the Docker API. Be clear about what `:ro`
+      # does and does not buy: it stops the container writing to the socket
+      # *file*, but it does NOT make the Docker API read-only - anything that
+      # can connect to the socket can start and stop containers. The real
+      # restriction is that no mutating tool is reachable from the graph
+      # (services/agent/tools.py). Phase 3 needs this read-write.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # The image runs as uid 10001, and the socket is root-owned with a
+    # host-specific group (991 under Colima). Override if yours differs:
+    #   DOCKER_SOCK_GID=$(stat -f '%g' /var/run/docker.sock) docker compose up -d
+    group_add:
+      - "${DOCKER_SOCK_GID:-991}"
+    depends_on:
+      db:
+        condition: service_healthy
+      # service_healthy, not service_started, for two reasons: orders owns the
+      # migration that creates the agent's own tables, and an agent that starts
+      # while the system is still booting would alert on it.
+      orders:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+    ports:
+      - "8010:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
   # Steady fake orders, so a broken service always produces visible symptoms.
   # Stop it with `docker compose stop traffic` for a quiet system.
   traffic:

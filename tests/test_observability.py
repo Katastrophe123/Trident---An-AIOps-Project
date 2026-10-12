@@ -13,9 +13,10 @@ import uuid
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient
 
-from services.common.app import UNMETERED_PATHS
+from services.common.app import UNMETERED_PATHS, ServiceContext
 from services.common.logging_setup import (
     JsonFormatter,
     LogBuffer,
@@ -379,3 +380,53 @@ class TestLogNoiseControl:
         records = buffer.tail(limit=10)
         assert len(records) == 1
         assert records[0]["event"] == "connection pool is full"
+
+
+class TestHealthAggregation:
+    """The overall `status` field is what the monitor reads, so anything a
+    dependency reports has to be reachable from it."""
+
+    async def test_a_degraded_dependency_degrades_the_service(
+        self, payments_app: tuple[FastAPI, ServiceContext], payments_client: AsyncClient
+    ) -> None:
+        _, context = payments_app
+
+        async def reduced() -> dict[str, Any]:
+            return {"name": "llm", "status": "degraded", "error": "running on a stub"}
+
+        context.extra_health_checks.append(reduced)
+
+        response = await payments_client.get("/health")
+        body = response.json()
+
+        assert response.status_code == 200  # still serving
+        assert body["status"] == "degraded"
+        assert "reduced capability: llm" in body["detail"]
+
+    async def test_an_unhealthy_dependency_outranks_a_degraded_one(
+        self, payments_app: tuple[FastAPI, ServiceContext], payments_client: AsyncClient
+    ) -> None:
+        _, context = payments_app
+
+        async def reduced() -> dict[str, Any]:
+            return {"name": "llm", "status": "degraded", "error": None}
+
+        async def broken() -> dict[str, Any]:
+            return {"name": "inventory", "status": "unhealthy", "error": "HTTP 503"}
+
+        context.extra_health_checks.extend([reduced, broken])
+
+        body = (await payments_client.get("/health")).json()
+        assert body["status"] == "degraded"
+        assert body["detail"] == "a dependency is unavailable"
+
+    async def test_all_healthy_dependencies_leave_the_service_healthy(
+        self, payments_app: tuple[FastAPI, ServiceContext], payments_client: AsyncClient
+    ) -> None:
+        _, context = payments_app
+
+        async def fine() -> dict[str, Any]:
+            return {"name": "llm", "status": "healthy", "error": None}
+
+        context.extra_health_checks.append(fine)
+        assert (await payments_client.get("/health")).json()["status"] == "healthy"

@@ -112,3 +112,119 @@ SEED_SKUS: tuple[tuple[str, int], ...] = (
     ("SKU-MOUSE-WL", 500),
     ("SKU-KEYB-MECH", 500),
 )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: the agent's own tables
+#
+# Deliberately in the same database and the same metadata as the demo store.
+# One migration history, one connection story - and it means the agent's record
+# of an incident sits next to the orders that were failing during it.
+# --------------------------------------------------------------------------- #
+class Incident(Base):
+    """One investigation, from alert to postmortem."""
+
+    __tablename__ = "incidents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    #: The service the alert fired for. Not necessarily the service at fault -
+    #: database exhaustion alerts on the innocent services, which is the whole
+    #: reason this and `root_cause_service` are separate columns.
+    service: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: open | diagnosed | escalated | resolved | failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    #: What tripped the alert, in words: "health check returned unhealthy".
+    trigger: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: manual | monitor - how the investigation started.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+
+    root_cause: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    root_cause_service: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    proposed_fix: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    #: llm | stub - recorded so a diagnosis produced without a real model is
+    #: never mistaken for one that used it.
+    diagnosis_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(TimestampType, default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(TimestampType, nullable=True)
+
+    __table_args__ = (Index("ix_incidents_status_created", "status", "created_at"),)
+
+
+class IncidentStep(Base):
+    """One graph node execution: what went in, what came out, how long it took.
+
+    This is the audit trail. An agent that cannot show its working is not
+    trustworthy, so every node writes a row here whether it succeeds or not.
+    """
+
+    __tablename__ = "incident_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Execution order within the incident, so the trace reads top to bottom.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    node: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: ok | error
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    #: JSON-encoded rather than JSONB: the same schema has to run on SQLite in
+    #: the test suite, and nothing queries inside these blobs.
+    input: Mapped[str | None] = mapped_column(String(8000), nullable=True)
+    output: Mapped[str | None] = mapped_column(String(8000), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    latency_ms: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(TimestampType, default=utcnow)
+
+    __table_args__ = (Index("ix_incident_steps_incident_sequence", "incident_id", "sequence"),)
+
+
+class Action(Base):
+    """A remediation the agent proposed, and what became of it.
+
+    Written in Phase 2 with ``status='proposed'`` and never executed - the
+    agent has no action tools wired into the graph yet. Phase 3 adds the
+    approval gate that moves a row to approved/rejected/applied.
+    """
+
+    __tablename__ = "actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: Must be a name from the tool allowlist; free text is never executed.
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: safe | risky - decides whether Phase 3 needs human approval.
+    risk: Mapped[str] = mapped_column(String(16), nullable=False, default="risky")
+    #: proposed | approved | rejected | applied | failed
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="proposed")
+    approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TimestampType, default=utcnow)
+
+
+class Postmortem(Base):
+    """The written report. One per incident."""
+
+    __tablename__ = "postmortems"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    #: Markdown: timeline, root cause, actions taken, prevention.
+    body: Mapped[str] = mapped_column(String(16000), nullable=False)
+    #: llm | stub, same reasoning as Incident.diagnosis_source.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="llm")
+    created_at: Mapped[datetime] = mapped_column(TimestampType, default=utcnow)

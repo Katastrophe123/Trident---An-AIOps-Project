@@ -14,7 +14,7 @@ concurrency:
 env:
   # Nothing in the test suite touches a real database or a real network, but
   # the settings object still needs a value to validate against.
-  DATABASE_URL: sqlite+aiosqlite:///:memory:
+  DATABASE_URL: "sqlite+aiosqlite:///:memory:"
   SERVICE_NAME: ci
 
 jobs:
@@ -71,7 +71,12 @@ jobs:
           docker compose config --quiet
 
       - name: Start the stack
-        run: docker compose up -d --build --wait --wait-timeout 300
+        run: |
+          # The agent container needs the group that owns the Docker socket,
+          # and the gid differs between CI runners and local Colima.
+          export DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+          echo "docker.sock gid: $DOCKER_SOCK_GID"
+          docker compose up -d --build --wait --wait-timeout 300
 
       - name: Every service reports healthy
         run: |
@@ -106,6 +111,38 @@ jobs:
                 assert lines, 'no JSON log lines found'; \
                 [json.loads(l) for l in lines]; \
                 print(f'{len(lines)} structured log lines')"
+
+      - name: The agent is up and honest about its LLM
+        run: |
+          curl -fsS http://localhost:8010/health \
+            | python -c "import json,sys; h=json.load(sys.stdin); \
+                llm=[d for d in h['dependencies'] if d['name']=='llm'][0]; \
+                assert llm['status']=='degraded', llm; \
+                assert 'stub' in (llm['error'] or ''), llm; \
+                print('agent health ok; llm reported as', llm['status'])"
+
+      - name: The tool allowlist is published and risky tools are not reachable
+        run: |
+          curl -fsS http://localhost:8010/tools \
+            | python -c "import json,sys; t=json.load(sys.stdin); \
+                names={x['name'] for x in t}; \
+                assert names=={'get_logs','get_metrics','get_container_status','restart_container','rollback_config'}, names; \
+                assert all(not x['enabled_in_graph'] for x in t if x['risk']=='risky'); \
+                print('allowlist ok:', sorted(names))"
+
+      - name: The agent diagnoses a crashed service end to end
+        run: |
+          docker compose stop payments
+          sleep 20
+          curl -fsS 'http://localhost:8010/incidents?limit=5' \
+            | python -c "import json,sys; rows=json.load(sys.stdin); \
+                live=[r for r in rows if r['root_cause_service']]; \
+                assert live, 'the monitor opened no diagnosed incident'; \
+                top=live[0]; \
+                assert top['root_cause_service']=='payments', top; \
+                assert top['confidence'] and top['confidence'] > 0.5, top; \
+                print('diagnosed:', top['root_cause'])"
+          docker compose start payments
 
       - name: Dump logs on failure
         if: failure()

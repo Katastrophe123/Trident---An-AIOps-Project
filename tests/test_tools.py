@@ -13,6 +13,7 @@ the RUNBOOK walkthrough, because faking it would only test the mock.
 from __future__ import annotations
 
 import inspect
+import pathlib
 import random
 import subprocess
 from pathlib import Path
@@ -887,3 +888,65 @@ class TestBadConfigUsesComposeInterpolation:
             if "env_file" in line and not line.lstrip().startswith("#")
         ]
         assert directives == []
+
+
+class TestProjectConfigIsValid:
+    """Guards two files nothing else exercises until it is too late.
+
+    The CI workflow shipped unparseable: `DATABASE_URL: sqlite+aiosqlite:///:memory:`
+    is invalid YAML, because a plain scalar ending in ':' is read as a mapping
+    key. Nothing caught it locally because nothing ever parsed the file - it
+    would simply have failed on GitHub.
+    """
+
+    @staticmethod
+    def load(path: str) -> Any:
+        import yaml
+
+        return yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8"))
+
+    def test_the_ci_workflow_parses(self) -> None:
+        workflow = self.load(".github/workflows/ci.yml")
+        assert set(workflow["jobs"]) == {"quality", "compose"}
+        assert workflow["jobs"]["quality"]["steps"]
+
+    def test_the_ci_workflow_runs_the_whole_gate(self) -> None:
+        workflow = self.load(".github/workflows/ci.yml")
+        commands = " ".join(
+            str(step.get("run", "")) for step in workflow["jobs"]["quality"]["steps"]
+        )
+        for expected in ("ruff check", "ruff format --check", "mypy", "pytest"):
+            assert expected in commands, expected
+
+    def test_the_compose_file_parses_and_defines_every_service(self) -> None:
+        compose_file = self.load("docker-compose.yml")
+        assert set(compose_file["services"]) == {
+            "db",
+            "orders",
+            "payments",
+            "inventory",
+            "console",
+            "agent",
+            "traffic",
+        }
+
+    def test_only_one_service_runs_migrations(self) -> None:
+        """Three services racing `alembic upgrade head` is an intermittent
+        failure indistinguishable from an injected fault."""
+        compose_file = self.load("docker-compose.yml")
+        migrators = [
+            name
+            for name, spec in compose_file["services"].items()
+            if str((spec.get("environment") or {}).get("RUN_MIGRATIONS", "")).lower() == "true"
+        ]
+        assert migrators == ["orders"]
+
+    def test_only_the_agent_gets_the_docker_socket(self) -> None:
+        """The plan reserves socket access for the agent."""
+        compose_file = self.load("docker-compose.yml")
+        with_socket = [
+            name
+            for name, spec in compose_file["services"].items()
+            if any("docker.sock" in str(v) for v in (spec.get("volumes") or []))
+        ]
+        assert with_socket == ["agent"]
